@@ -1,3 +1,13 @@
+.PHONY: cuda run-cuda
+
+run-cuda: bin/main-cu
+	./bin/main-cu
+
+cuda: bin/main-cu
+
+bin/main-cu: bin main.cu
+	nvcc main.cu -o bin/main-cu
+
 bin/main: bin/main.o
 	g++ -o bin/main bin/main.o
 
