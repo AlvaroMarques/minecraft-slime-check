@@ -4,8 +4,9 @@
 #include <iostream>
 
 #define MINECRAFT_SALT           987234911LL
+#define CHUNK_SIZE               16
 #define LINE_SIZE                16
-#define CHUNKS_TO_BLOCKS(chunks) ((chunks) * 16)
+#define CHUNKS_TO_BLOCKS(chunks) ((chunks) * CHUNK_SIZE)
 
 class JavaRandom
 {
@@ -111,16 +112,16 @@ int main(void)
 
     // Minecraft world boundaries in blocks: -30M to +30M
     // Boundary in Chunks: -1,875,000 to +1,875,000
-    int32_t start_x = -30000000 / 16;
-    int32_t start_z = -30000000 / 16;
-    int32_t end_z   = 30000000 / 16;
+    int32_t start_x = -30000000 / CHUNK_SIZE;
+    int32_t start_z = -30000000 / CHUNK_SIZE;
+    int32_t end_z   = 30000000 / CHUNK_SIZE;
 
     // Total chunks across the X axis = 3,750,000
-    // Number of 16x16 grids along the X axis
-    const int32_t total_x_grids = (30000000 / 16 * 2) / LINE_SIZE;
+    // Number of CHUNK_SIZExCHUNK_SIZE grids along the X axis
+    const int32_t total_x_grids = (30000000 / CHUNK_SIZE * 2) / LINE_SIZE;
 
-    const int threadsPerBlock = 256;           // 16x16 threads
-    const int cudaBlocksToUse = total_x_grids; // One block per 16x16 grid
+    const int threadsPerBlock = 256;           // CHUNK_SIZExCHUNK_SIZE threads
+    const int cudaBlocksToUse = total_x_grids; // One block per CHUNK_SIZExCHUNK_SIZE grid
 
     size_t N = cudaBlocksToUse; // Number of grids being processed per Z-row
 
@@ -136,39 +137,31 @@ int main(void)
 
     int32_t current_z = start_z;
 
-    // Loop down the Z axis, stepping by 16 chunks at a time
-    while (current_z <= end_z - LINE_SIZE) {
+    // Loop down the Z axis, stepping by CHUNK_SIZE chunks at a time
+    while (current_z <= end_z - LINE_SIZE && global_min != 0) {
+        // Progress printout every ~1000 rows
+        if ((current_z - start_z) % (CHUNK_SIZE * 1000) == 0) {
+            printf("Scanned down to Z: %d\n", current_z);
+        }
 
         checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, start_x, current_z, salt, isSlimeChunkGPU, N);
 
         cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, N * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
         // Scan the CPU array for the "deadest" chunk
-        for (int i = 0; i < N; i++) {
+        for (int i = 0; i < N && global_min != 0; i++) {
             if (isSlimeChunkCPU[i] < global_min) {
                 global_min = isSlimeChunkCPU[i];
                 best_x     = start_x + (i * LINE_SIZE);
                 best_z     = current_z;
-
-                // If we found a grid with 0 slime chunks, we can't get any lower!
-                if (global_min == 0) {
-                    printf("\nFound a perfectly dead 16x16 grid early!\n");
-                    goto search_finished;
-                }
             }
         }
 
         current_z += LINE_SIZE;
-
-        // Progress printout every ~1000 rows
-        if ((current_z - start_z) % (16 * 1000) == 0) {
-            printf("Scanned down to Z: %d\n", current_z);
-        }
     }
 
-search_finished:
     printf("\n=== SEARCH COMPLETE ===\n");
-    printf("Minimum Slime Chunks found in a 16x16 area: %d\n", global_min);
+    printf("Minimum Slime Chunks found in a CHUNK_SIZExCHUNK_SIZE area: %d\n", global_min);
     printf("Chunk Coordinates: X: %d, Z: %d\n", best_x, best_z);
     printf("Block Coordinates: X: %d, Z: %d\n", CHUNKS_TO_BLOCKS(best_x), CHUNKS_TO_BLOCKS(best_z));
 
