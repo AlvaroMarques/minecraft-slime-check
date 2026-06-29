@@ -1,9 +1,16 @@
-.PHONY: cuda run-cuda
+.PHONY: cuda run-cuda fmt
+
+CLANG_FORMAT ?= clang-format-21
 
 run-cuda: bin/main-cu
 	./bin/main-cu
 
 cuda: bin/main-cu
+
+
+fmt:
+	@$(CLANG_FORMAT) -i *.cpp *.cu
+	echo "Formatted!"
 
 bin/main-cu: bin main.cu
 	nvcc main.cu -o bin/main-cu
