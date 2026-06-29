@@ -60,13 +60,14 @@ __device__ int64_t slime_seed(int64_t world_seed, int32_t x, int32_t z, int64_t 
     return addition_3 ^ salt;
 }
 
-__global__ void checkSlimeChunk(const int64_t world_seed, const int32_t x, const int32_t z, const int64_t salt, bool *isSlimeChunk) {
-    // i is unused right now, but kept here assuming you plan to scale this to process grids of chunks later
-    // int i = blockDim.x * blockIdx.x + threadIdx.x;
+__global__ void checkSlimeChunk(const int64_t world_seed, const int32_t x, const int32_t z, const int64_t salt, int32_t *isSlimeChunk, const int32_t N) {
+    int32_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
-    int64_t sseed = slime_seed(world_seed, x, z, salt);
-    JavaRandom jr(sseed);
-    *isSlimeChunk = jr.nextInt(10) == 0;
+	if (i < N) {
+		int64_t sseed = slime_seed(world_seed, x + i, z, salt);
+		JavaRandom jr(sseed);
+		isSlimeChunk[i] = jr.nextInt(10) == 0;
+	}
 }
 
 int main(void) {
@@ -75,20 +76,27 @@ int main(void) {
     int64_t world_seed = 9876543210LL;
     int64_t salt = MINECRAFT_SALT;
 
-    int32_t x = 185;
-    int32_t z = 196;
+    int32_t x = 0;
+    int32_t z = 0;
 
-    bool *isSlimeChunkGPU = NULL;
 
-    // FIXED: Target the GPU pointer's address, not the host bool's address
-    cudaMalloc((void**) &isSlimeChunkGPU, sizeof(bool));
 
-    checkSlimeChunk<<<1, 1>>>(world_seed, x, z, salt, isSlimeChunkGPU);
 
-    // FIXED: Destination is host pointer, Source is device pointer
-    cudaMemcpy(&isSlimeChunk, isSlimeChunkGPU, sizeof(bool), cudaMemcpyDeviceToHost);
+	const int threadsPerBlock = 256;
+	const int blocksToUse = 1;
+	const int blockOfChunksSize = blocksToUse * threadsPerBlock;
 
-    printf("x: %d, z: %d, is slime? %d\n", x, z, isSlimeChunk);
+    int32_t *isSlimeChunkGPU = NULL;
+    cudaMalloc((void**) &isSlimeChunkGPU, blockOfChunksSize * sizeof(int32_t));
+
+    int32_t *isSlimeChunkCPU = (int32_t*) malloc(blockOfChunksSize * sizeof(int32_t));
+    checkSlimeChunk<<<blocksToUse, threadsPerBlock>>>(world_seed, x, z, salt, isSlimeChunkGPU, blockOfChunksSize);
+
+    cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, blockOfChunksSize * sizeof(int32_t), cudaMemcpyDeviceToHost);
+
+	for (; x < blockOfChunksSize ; x++) {
+		printf("%d,%d,%d\n", x, z, isSlimeChunkCPU[x]);
+	}
 
     cudaFree(isSlimeChunkGPU);
 
