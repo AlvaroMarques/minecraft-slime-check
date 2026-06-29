@@ -6,6 +6,8 @@
 #define MINECRAFT_SALT 987234911
 #define sum64(x, y) (static_cast<int64_t>(x)) + (static_cast<int64_t>(y))
 
+#define X_LINE_SIZE 16
+
 class JavaRandom {
 private:
     uint64_t seed;
@@ -64,7 +66,9 @@ __global__ void checkSlimeChunk(const int64_t world_seed, const int32_t x, const
     int32_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
 	if (i < N) {
-		int64_t sseed = slime_seed(world_seed, x + i, z, salt);
+		int32_t x_iter = i % X_LINE_SIZE;
+		int32_t z_iter = i / X_LINE_SIZE;
+		int64_t sseed = slime_seed(world_seed, x + i_ter, z + z_iter, salt);
 		JavaRandom jr(sseed);
 		isSlimeChunk[i] = jr.nextInt(10) == 0;
 	}
@@ -83,14 +87,16 @@ int main(void) {
 
 
 	const int threadsPerBlock = 256;
-	const int blocksToUse = 1;
-	const int blockOfChunksSize = blocksToUse * threadsPerBlock;
+	const int cudaBlocksToUse = 1;
+
+	const int blockOfChunksSize = cudaBlocksToUse * threadsPerBlock;
+
 
     int32_t *isSlimeChunkGPU = NULL;
     cudaMalloc((void**) &isSlimeChunkGPU, blockOfChunksSize * sizeof(int32_t));
 
     int32_t *isSlimeChunkCPU = (int32_t*) malloc(blockOfChunksSize * sizeof(int32_t));
-    checkSlimeChunk<<<blocksToUse, threadsPerBlock>>>(world_seed, x, z, salt, isSlimeChunkGPU, blockOfChunksSize);
+    checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, x, z, salt, isSlimeChunkGPU, blockOfChunksSize);
 
     cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, blockOfChunksSize * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
