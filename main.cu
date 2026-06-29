@@ -1,13 +1,11 @@
+#include <climits>
 #include <cstdint>
 #include <cuda_runtime.h>
-#include <stdio.h>
+#include <iostream>
 
-// Removed the trailing semicolon
-#define MINECRAFT_SALT 987234911
-#define sum64(x, y)    (static_cast<int64_t>(x)) + (static_cast<int64_t>(y))
-
-#define LINE_SIZE              16
-#define chunksToBlocks(chunks) (chunks * 16)
+#define MINECRAFT_SALT           987234911LL
+#define LINE_SIZE                16
+#define CHUNKS_TO_BLOCKS(chunks) ((chunks) * 16)
 
 class JavaRandom
 {
@@ -18,16 +16,11 @@ private:
     const uint64_t MASK       = (1ULL << 48) - 1;
 
 public:
-    __device__ JavaRandom(int64_t initial_seed)
-    {
-        // Cast to unsigned for bitwise XOR, then mask to 48 bits
-        seed = (static_cast<uint64_t>(initial_seed) ^ MULTIPLIER) & MASK;
-    }
+    __device__ JavaRandom(int64_t initial_seed) { seed = (static_cast<uint64_t>(initial_seed) ^ MULTIPLIER) & MASK; }
 
     __device__ int32_t next(int32_t bits)
     {
         seed = (seed * MULTIPLIER + ADDEND) & MASK;
-        // Because 'seed' is uint64_t, '>>' perfectly mimics Java's '>>>'
         return static_cast<int32_t>(seed >> (48 - bits));
     }
 
@@ -35,57 +28,90 @@ public:
     {
         if (bound <= 0)
             return 0;
-
         int32_t bits, val;
         do {
             bits = next(31);
             val  = bits % bound;
-            // Standard Java rejection sampling loop
         } while (bits - val + (bound - 1) < 0);
-
         return val;
     }
 };
 
 __device__ int64_t slime_seed(int64_t world_seed, int32_t x, int32_t z, int64_t salt)
 {
-    int32_t a1 = 4987142;
-    int32_t a2 = 5947611;
-    int64_t a3 = 4392871;
-    int32_t a4 = 389711;
+    uint32_t ux = static_cast<uint32_t>(x);
+    uint32_t uz = static_cast<uint32_t>(z);
 
-    int32_t first_operation   = x * x * a1;
-    int32_t second_operation  = x * a2;
-    int32_t third_operation_1 = z * z;
+    uint32_t p1_u = ux * ux * 4987142;
+    uint32_t p2_u = ux * 5947611;
+    uint32_t p3_u = uz * uz;
+    uint32_t p4_u = uz * 389711;
 
-    int64_t third_operation_2 = (static_cast<int64_t>(third_operation_1)) * a3;
-    int32_t fourth_operation  = z * a4;
+    int64_t part1 = static_cast<int64_t>(static_cast<int32_t>(p1_u));
+    int64_t part2 = static_cast<int64_t>(static_cast<int32_t>(p2_u));
+    int64_t part3 = static_cast<int64_t>(static_cast<int32_t>(p3_u)) * 4392871LL;
+    int64_t part4 = static_cast<int64_t>(static_cast<int32_t>(p4_u));
 
-    int64_t addition_0 = sum64(world_seed, first_operation);
-    int64_t addition_1 = sum64(addition_0, second_operation);
-    int64_t addition_2 = sum64(addition_1, third_operation_2);
-    int64_t addition_3 = sum64(addition_2, fourth_operation);
-
-    return addition_3 ^ salt;
+    return world_seed + part1 + part2 + part3 + part4 ^ salt;
 }
+__constant__ uint16_t image[16] = {
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0011000000011000,
+    0b0011000000011000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0010000000010000,
+    0b0011000000110000,
+    0b0001100001100000,
+    0b0000111111000000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000,
+};
 
 __global__ void checkSlimeChunk(const int64_t world_seed,
-                                const int32_t x,
-                                const int32_t z,
+                                const int32_t start_x,
+                                const int32_t current_z,
                                 const int64_t salt,
                                 int32_t      *isSlimeChunk,
                                 const int32_t N)
 {
-    int32_t bIdx             = blockIdx.x;
-    int32_t threadIdxOnBlock = threadIdx.x;
 
+    __shared__ int32_t blockSlimeCount;
+
+
+    // Thread 0 initializes the shared counter
+    if (threadIdx.x == 0) {
+        blockSlimeCount = 0;
+    }
+    __syncthreads(); // Wait for initialization
+
+    int32_t bIdx = blockIdx.x;
     if (bIdx < N) {
-        int32_t    x_init = x + bIdx * LINE_SIZE;
-        int32_t    x_iter = threadIdxOnBlock % LINE_SIZE;
-        int32_t    z_iter = threadIdxOnBlock / LINE_SIZE;
-        int64_t    sseed  = slime_seed(world_seed, x_init + x_iter, z + z_iter, salt);
+        int32_t x_init = start_x + (bIdx * LINE_SIZE);
+        int32_t x_iter = threadIdx.x % LINE_SIZE;
+        int32_t z_iter = threadIdx.x / LINE_SIZE;
+
+        int64_t    sseed = slime_seed(world_seed, x_init + x_iter, current_z + z_iter, salt);
         JavaRandom jr(sseed);
-        atomicAdd(&isSlimeChunk[bIdx], (jr.nextInt(10) == 0));
+
+        int32_t isSlime       = jr.nextInt(10) == 0;
+        int32_t shouldBeSlime = (image[z_iter] & (1 << x_iter)) ? 1 : 0;
+
+        if (isSlime == shouldBeSlime) {
+            // Atomic add to ultra-fast shared memory, NOT global memory
+            atomicAdd(&blockSlimeCount, 1);
+        }
+    }
+    __syncthreads(); // Wait for all 256 threads to finish counting
+
+    // Thread 0 writes the final sum to global memory once
+    if (threadIdx.x == 0 && bIdx < N) {
+        isSlimeChunk[bIdx] = blockSlimeCount;
     }
 }
 
@@ -100,50 +126,76 @@ void showLink(int64_t seed, int32_t x, int32_t z)
 
 int main(void)
 {
-
     int64_t world_seed = 9876543210LL;
     int64_t salt       = MINECRAFT_SALT;
 
-    int32_t x = -30000000L / 16;
-    int32_t z = -30000000L / 16;
-    printf("Starting at %d and %d\n", x, z);
+    // Minecraft world boundaries in blocks: -30M to +30M
+    // Boundary in Chunks: -1,875,000 to +1,875,000
+    int32_t start_x = -30000000 / 16;
+    int32_t start_z = -30000000 / 16;
+    int32_t end_z   = 30000000 / 16;
 
+    // Total chunks across the X axis = 3,750,000
+    // Number of 16x16 grids along the X axis
+    const int32_t total_x_grids = (30000000 / 16 * 2) / LINE_SIZE;
 
-    const int total_number_of_chunks = 30000000 / 16 * 2;
-    const int threadsPerBlock        = 256;
-    const int cudaBlocksToUse        = (total_number_of_chunks + threadsPerBlock - 1) / (threadsPerBlock);
+    const int threadsPerBlock = 256;           // 16x16 threads
+    const int cudaBlocksToUse = total_x_grids; // One block per 16x16 grid
 
+    size_t N = cudaBlocksToUse; // Number of grids being processed per Z-row
+
+    printf("Initializing GPU memory for %zu grids per row...\n", N);
 
     int32_t *isSlimeChunkGPU = NULL;
-    size_t   N               = cudaBlocksToUse;
     cudaMalloc((void **)&isSlimeChunkGPU, N * sizeof(int32_t));
-
     int32_t *isSlimeChunkCPU = (int32_t *)malloc(N * sizeof(int32_t));
-    int32_t  min;
-    int32_t  iter_min;
 
-    min           = INT_MAX;
-    iter_min      = 0;
-    int32_t z_min = 0;
-    for (int major_iter = 0; major_iter < total_number_of_chunks / 16; major_iter++) {
-        z += threadsPerBlock / LINE_SIZE;
+    int32_t global_max = INT_MIN;
+    int32_t best_x     = 0;
+    int32_t best_z     = 0;
 
-        cudaMemset(isSlimeChunkGPU, 0, N * sizeof(int32_t));
-        checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, x, z, salt, isSlimeChunkGPU, N);
+    int32_t current_z = start_z;
+
+    // Loop down the Z axis, stepping by 16 chunks at a time
+    while (current_z <= end_z - LINE_SIZE) {
+
+        checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, start_x, current_z, salt, isSlimeChunkGPU, N);
+
         cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, N * sizeof(int32_t), cudaMemcpyDeviceToHost);
-        for (int iter = 0; iter < N; iter++) {
-            if (min > isSlimeChunkCPU[iter]) {
-                min      = isSlimeChunkCPU[iter];
-                iter_min = iter;
-                z_min    = z;
+
+        // Scan the CPU array for the "deadest" chunk
+        for (int i = 0; i < N; i++) {
+            if (isSlimeChunkCPU[i] > global_max) {
+                global_max = isSlimeChunkCPU[i];
+                best_x     = start_x + (i * LINE_SIZE);
+                best_z     = current_z;
+
+                // If we found a grid with 0 slime chunks, we can't get any lower!
+                if (global_max == 256) {
+                    printf("\nFound a perfectly dead 16x16 grid early!\n");
+                    goto search_finished;
+                }
             }
         }
+
+        current_z += LINE_SIZE;
+
+        // Progress printout every ~1000 rows
+        if ((current_z - start_z) % (16 * 1000) == 0) {
+            printf("Scanned down to Z: %d\n - Global Max: %d\n", current_z, global_max);
+        }
     }
-    printf("Stop getting z at %d\n", z);
-    printf("%d\t%d\t%d\n", chunksToBlocks(x + iter_min * LINE_SIZE), chunksToBlocks(z_min), min);
-    showLink(world_seed, chunksToBlocks(x + iter_min * LINE_SIZE), chunksToBlocks(z_min));
+
+search_finished:
+    printf("\n=== SEARCH COMPLETE ===\n");
+    printf("Minimum Slime Chunks found in a 16x16 area: %d\n", global_max);
+    printf("Chunk Coordinates: X: %d, Z: %d\n", best_x, best_z);
+    printf("Block Coordinates: X: %d, Z: %d\n", CHUNKS_TO_BLOCKS(best_x), CHUNKS_TO_BLOCKS(best_z));
+
+    showLink(world_seed, CHUNKS_TO_BLOCKS(best_x), CHUNKS_TO_BLOCKS(best_z));
 
     cudaFree(isSlimeChunkGPU);
+    free(isSlimeChunkCPU);
 
     return 0;
 }
