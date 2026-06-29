@@ -25,5 +25,4 @@ bin:
 	@mkdir -p bin
 
 clean:
-	rm bin/main
-	rm bin/*.o
+	rm bin/*
