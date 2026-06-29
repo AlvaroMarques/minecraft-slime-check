@@ -6,7 +6,8 @@
 #define MINECRAFT_SALT 987234911
 #define sum64(x, y)    (static_cast<int64_t>(x)) + (static_cast<int64_t>(y))
 
-#define X_LINE_SIZE 16
+#define X_LINE_SIZE            16
+#define chunksToBlocks(chunks) (chunks * 16)
 
 class JavaRandom
 {
@@ -75,14 +76,17 @@ __global__ void checkSlimeChunk(const int64_t world_seed,
                                 int32_t      *isSlimeChunk,
                                 const int32_t N)
 {
-    int32_t i = blockDim.x * blockIdx.x + threadIdx.x;
+    int32_t iter             = blockDim.x * blockIdx.x + threadIdx.x;
+    int32_t bIdx             = blockIdx.x;
+    int32_t threadIdxOnBlock = threadIdx.x;
 
-    if (i < N) {
-        int32_t    x_iter = i % X_LINE_SIZE;
-        int32_t    z_iter = i / X_LINE_SIZE;
-        int64_t    sseed  = slime_seed(world_seed, x + i_ter, z + z_iter, salt);
+    if (bIdx < N) {
+        int32_t    x_init = x + bIdx * X_LINE_SIZE;
+        int32_t    x_iter = threadIdxOnBlock % X_LINE_SIZE;
+        int32_t    z_iter = threadIdxOnBlock / X_LINE_SIZE;
+        int64_t    sseed  = slime_seed(world_seed, x_init + x_iter, z + z_iter, salt);
         JavaRandom jr(sseed);
-        isSlimeChunk[i] = jr.nextInt(10) == 0;
+        atomicAdd(&isSlimeChunk[bIdx], (jr.nextInt(10) == 0));
     }
 }
 
@@ -94,25 +98,38 @@ int main(void)
     int64_t salt       = MINECRAFT_SALT;
 
     int32_t x = 0;
-    int32_t z = 0;
+    int32_t z = 256;
 
 
     const int threadsPerBlock = 256;
-    const int cudaBlocksToUse = 1;
+    const int cudaBlocksToUse = 4096;
 
     const int blockOfChunksSize = cudaBlocksToUse * threadsPerBlock;
 
 
     int32_t *isSlimeChunkGPU = NULL;
-    cudaMalloc((void **)&isSlimeChunkGPU, blockOfChunksSize * sizeof(int32_t));
+    size_t   N               = cudaBlocksToUse;
+    cudaMalloc((void **)&isSlimeChunkGPU, N * sizeof(int32_t));
 
-    int32_t *isSlimeChunkCPU = (int32_t *)malloc(blockOfChunksSize * sizeof(int32_t));
-    checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, x, z, salt, isSlimeChunkGPU, blockOfChunksSize);
+    int32_t *isSlimeChunkCPU = (int32_t *)malloc(N * sizeof(int32_t));
+    int32_t  max             = INT_MIN;
+    size_t   iter_max        = 0;
 
-    cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, blockOfChunksSize * sizeof(int32_t), cudaMemcpyDeviceToHost);
-
-    for (; x < blockOfChunksSize; x++) {
-        printf("%d,%d,%d\n", x, z, isSlimeChunkCPU[x]);
+    for (int major_iter = 0; major_iter < 100; major_iter++) {
+        z += 256;
+        cudaMemset(isSlimeChunkGPU, 0, N * sizeof(int32_t));
+        checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, x, z, salt, isSlimeChunkGPU, N);
+        cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, N * sizeof(int32_t), cudaMemcpyDeviceToHost);
+        max      = INT_MIN;
+        iter_max = 0;
+        for (int iter = 0; iter < N; iter++) {
+            if (max < isSlimeChunkCPU[iter]) {
+                max      = isSlimeChunkCPU[iter];
+                iter_max = iter;
+            }
+        }
+        printf(
+            "%d\t%d\t%d\n", chunksToBlocks(x + iter_max * X_LINE_SIZE), chunksToBlocks(z), isSlimeChunkCPU[iter_max]);
     }
 
     cudaFree(isSlimeChunkGPU);
