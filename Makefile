@@ -21,6 +21,13 @@ bin/main: bin/main.o
 bin/main.o: main.cpp bin
 	g++ -c main.cpp -o bin/main.o
 
+bin/test: test.cpp bin
+	g++ test.cpp -o bin/test
+
+test: bin/test
+	./bin/test --world-seed -100 --init-z 0 --final-z 256
+	./bin/test --world-seed
+
 bin:
 	@mkdir -p bin
 

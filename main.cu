@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <string>
+#include <vector>
 
 #define MINECRAFT_SALT           987234911LL
 #define CHUNK_SIZE               16
@@ -39,10 +41,11 @@ public:
 };
 
 // FIXED: Re-implemented strict uint32_t casting to prevent C++ Undefined Behavior
-__device__ int64_t slime_seed(int64_t world_seed, int32_t x, int32_t z, int64_t salt)
+__device__ int64_t slime_seed(int64_t world_seed, int32_t x, int32_t z)
 {
-    uint32_t ux = static_cast<uint32_t>(x);
-    uint32_t uz = static_cast<uint32_t>(z);
+    int64_t  salt = MINECRAFT_SALT;
+    uint32_t ux   = static_cast<uint32_t>(x);
+    uint32_t uz   = static_cast<uint32_t>(z);
 
     uint32_t p1_u = ux * ux * 4987142;
     uint32_t p2_u = ux * 5947611;
@@ -60,7 +63,6 @@ __device__ int64_t slime_seed(int64_t world_seed, int32_t x, int32_t z, int64_t 
 __global__ void checkSlimeChunk(const int64_t world_seed,
                                 const int32_t start_x,
                                 const int32_t current_z,
-                                const int64_t salt,
                                 int32_t      *isSlimeChunk,
                                 const int32_t N)
 {
@@ -80,7 +82,7 @@ __global__ void checkSlimeChunk(const int64_t world_seed,
         int32_t x_iter = threadIdx.x % LINE_SIZE;
         int32_t z_iter = threadIdx.x / LINE_SIZE;
 
-        int64_t    sseed = slime_seed(world_seed, x_init + x_iter, current_z + z_iter, salt);
+        int64_t    sseed = slime_seed(world_seed, x_init + x_iter, current_z + z_iter);
         JavaRandom jr(sseed);
 
         if (jr.nextInt(10) == 0) {
@@ -105,16 +107,55 @@ void showLink(int64_t seed, int32_t x, int32_t z)
            z);
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-    int64_t world_seed = 9876543210LL;
-    int64_t salt       = MINECRAFT_SALT;
+    std::vector<std::string> args(argv, argv + argc);
+
+
+    int64_t world_seed = 0;
+    int32_t start_z    = 0;
+    int32_t end_z      = 0;
+    for (auto it = args.begin() + 1; it != args.end(); ++it) {
+        std::string cmd_name = *it;
+        if (cmd_name == "--world-seed") {
+            if (it + 1 == args.end()) {
+                printf("Bad parsing!");
+                std::exit(1);
+            }
+            else {
+                it++;
+                world_seed = stol(*it);
+            }
+        }
+        else if (cmd_name == "--start-z") {
+            if (it + 1 == args.end()) {
+                printf("Bad parsing!");
+                std::exit(1);
+            }
+            else {
+                it++;
+                start_z = stoi(*it);
+            }
+        }
+        else if (cmd_name == "--end-z") {
+            if (it + 1 == args.end()) {
+                printf("Bad parsing!");
+                std::exit(1);
+            }
+            else {
+                it++;
+                end_z = stoi(*it);
+            }
+        }
+        else {
+            std::cout << "Unknown arg: " << cmd_name << std::endl;
+        }
+    }
+    printf("Start Z %d End Z %d\n", start_z, end_z);
 
     // Minecraft world boundaries in blocks: -30M to +30M
     // Boundary in Chunks: -1,875,000 to +1,875,000
     int32_t start_x = -30000000 / CHUNK_SIZE;
-    int32_t start_z = -30000000 / CHUNK_SIZE;
-    int32_t end_z   = 30000000 / CHUNK_SIZE;
 
     // Total chunks across the X axis = 3,750,000
     // Number of CHUNK_SIZExCHUNK_SIZE grids along the X axis
@@ -144,7 +185,7 @@ int main(int argc, char* argv[])
             printf("Scanned down to Z: %d\n", current_z);
         }
 
-        checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, start_x, current_z, salt, isSlimeChunkGPU, N);
+        checkSlimeChunk<<<cudaBlocksToUse, threadsPerBlock>>>(world_seed, start_x, current_z, isSlimeChunkGPU, N);
 
         cudaMemcpy(isSlimeChunkCPU, isSlimeChunkGPU, N * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
@@ -161,7 +202,7 @@ int main(int argc, char* argv[])
     }
 
     printf("\n=== SEARCH COMPLETE ===\n");
-    printf("Minimum Slime Chunks found in a CHUNK_SIZExCHUNK_SIZE area: %d\n", global_min);
+    printf("Minimum Slime Chunks found in a %dx%d area: %d\n", CHUNK_SIZE, CHUNK_SIZE, global_min);
     printf("Chunk Coordinates: X: %d, Z: %d\n", best_x, best_z);
     printf("Block Coordinates: X: %d, Z: %d\n", CHUNKS_TO_BLOCKS(best_x), CHUNKS_TO_BLOCKS(best_z));
 
