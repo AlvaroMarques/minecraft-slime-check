@@ -105,9 +105,10 @@ void showLink(int64_t seed, int32_t x, int32_t z)
            z);
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
-    int64_t world_seed = 9876543210LL;
+
+	int64_t world_seed = std::stoll(argv[1]);
     int64_t salt       = MINECRAFT_SALT;
 
     // Minecraft world boundaries in blocks: -30M to +30M
